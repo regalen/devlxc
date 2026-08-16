@@ -79,7 +79,7 @@ rm -f /tmp/actions-runner.tar.gz
 # Jobs inherit this, not /etc/profile.d, because svc.sh writes a system unit.
 cat > "${TARGET}/.env" <<EOF
 DOCKER_HOST=unix:///run/user/${RUNNER_UID}/podman.sock
-TESTCONTAINERS_RYUK_DISABLED=true
+TESTCONTAINERS_RYUK_PRIVILEGED=true
 XDG_RUNTIME_DIR=/run/user/${RUNNER_UID}
 RUNNER_TOOL_CACHE=${TARGET}/_work/_tool
 DOTNET_INSTALL_DIR=${RUNNER_HOME}/.dotnet
