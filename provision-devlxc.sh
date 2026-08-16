@@ -130,10 +130,11 @@ cat > /etc/profile.d/devlxc.sh <<EOF
 # Point Docker-speaking tooling at the rootless podman socket.
 export DOCKER_HOST=unix:///run/user/${DEV_UID}/podman.sock
 
-# Testcontainers' Ryuk reaper wants a privileged sidecar with access to the
-# daemon socket, which rootless podman will not give it. Disable it and let
-# the test host clean up its own containers.
-export TESTCONTAINERS_RYUK_DISABLED=true
+# Testcontainers' Ryuk reaper mounts the runtime socket into itself so it can
+# clean up after a test process that dies. Rootless podman refuses that mount
+# unless Ryuk is marked privileged. With this set it works, and an interrupted
+# test run no longer leaves orphaned SQL Server containers eating 2GB each.
+export TESTCONTAINERS_RYUK_PRIVILEGED=true
 
 export PATH="\$HOME/.local/bin:\$HOME/.dotnet/tools:\$PATH"
 EOF
