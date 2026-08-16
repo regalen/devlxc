@@ -27,7 +27,15 @@ DEV_TZ="${DEV_TZ:-Australia/Melbourne}"
 DEV_HOME="/home/${DEV_USER}"
 SRC_DIR="${DEV_HOME}/src"
 
-as_user() { runuser -l "$DEV_USER" -c "$*"; }
+# runuser -l does not set XDG_RUNTIME_DIR or the DBus address, so anything
+# using `systemctl --user` fails with "$DBUS_SESSION_BUS_ADDRESS and
+# $XDG_RUNTIME_DIR not defined". Supply both on every call.
+as_user() {
+  local uid
+  uid="$(id -u "$DEV_USER" 2>/dev/null || echo 0)"
+  runuser -l "$DEV_USER" -c \
+    "export XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus; $*"
+}
 
 # ---------------------------------------------------------------------------
 # 1. Base system
@@ -106,9 +114,18 @@ loginctl enable-linger "$DEV_USER"
 # ---------------------------------------------------------------------------
 log "Rootless podman"
 
-as_user "systemctl --user enable --now podman.socket"
-
 DEV_UID="$(id -u "$DEV_USER")"
+
+# enable-linger starts the user manager asynchronously, so /run/user/<uid>
+# may not exist for a second or two after it returns.
+for _ in $(seq 1 30); do
+  [[ -d "/run/user/${DEV_UID}" ]] && break
+  sleep 1
+done
+[[ -d "/run/user/${DEV_UID}" ]] || warn "/run/user/${DEV_UID} never appeared; is lingering enabled?"
+
+as_user "systemctl --user enable --now podman.socket" \
+  || warn "Could not enable the user podman socket; container tests will fail"
 cat > /etc/profile.d/devlxc.sh <<EOF
 # Point Docker-speaking tooling at the rootless podman socket.
 export DOCKER_HOST=unix:///run/user/${DEV_UID}/podman.sock
