@@ -34,6 +34,11 @@ as_user() { runuser -l "$DEV_USER" -c "$*"; }
 # ---------------------------------------------------------------------------
 log "Base packages"
 
+# bubblewrap is in the base set rather than tied to the Codex toggle: Codex
+# uses it to sandbox the commands it runs and warns on every launch without
+# it, and it is small enough that conditionally installing it is not worth
+# the branch.
+
 # SELinux is inert in an LXC guest anyway (the Proxmox host kernel runs
 # AppArmor and loads no SELinux policy), but Fedora userspace tools get noisy
 # about the mismatch. Make the config agree with reality.
@@ -47,6 +52,7 @@ dnf -y --setopt=install_weak_deps=False install \
   git curl wget tar xz unzip jq which findutils procps-ng iproute hostname \
   ca-certificates openssl openssl-libs libicu tzdata \
   tmux ripgrep vim rsync bash-completion ncdu htop \
+  bubblewrap \
   sudo shadow-utils passwd \
   gh \
   podman podman-docker fuse-overlayfs slirp4netns \
