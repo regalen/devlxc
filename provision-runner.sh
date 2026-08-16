@@ -203,15 +203,34 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "${OPT_AUTOUPDATE:-false}" == "true" ]]; then
   log "Unattended security updates"
-  dnf -y --setopt=install_weak_deps=False install dnf-automatic
-  # Security errata only, applied automatically. Kernel packages are excluded
-  # because an LXC guest cannot use one.
-  sed -i \
-    -e 's/^upgrade_type =.*/upgrade_type = security/' \
-    -e 's/^apply_updates =.*/apply_updates = yes/' \
-    /etc/dnf/automatic.conf
-  grep -q '^exclude' /etc/dnf/dnf.conf || echo 'exclude=kernel*' >> /etc/dnf/dnf.conf
-  systemctl enable --now dnf-automatic.timer
+  dnf -y --setopt=install_weak_deps=False install dnf-automatic || \
+    dnf -y --setopt=install_weak_deps=False install dnf5-plugin-automatic || \
+    warn "no automatic update plugin available"
+
+  # dnf5 moved the config and renamed the units, so find both rather than
+  # assuming either layout.
+  AUTOCONF=""
+  for c in /etc/dnf/automatic.conf /etc/dnf/dnf5-plugins/automatic.conf; do
+    [[ -f "$c" ]] && { AUTOCONF="$c"; break; }
+  done
+
+  if [[ -n "$AUTOCONF" ]]; then
+    sed -i \
+      -e 's/^upgrade_type *=.*/upgrade_type = security/' \
+      -e 's/^apply_updates *=.*/apply_updates = yes/' \
+      "$AUTOCONF"
+    echo "  configured ${AUTOCONF}"
+  else
+    warn "could not find automatic.conf; security updates not configured"
+  fi
+
+  AUTOTIMER="$(systemctl list-unit-files --no-legend 2>/dev/null \
+    | awk '{print $1}' | grep -E '^dnf5?-automatic\.timer$' | head -n1)"
+  if [[ -n "$AUTOTIMER" ]]; then
+    systemctl enable --now "$AUTOTIMER" && echo "  enabled ${AUTOTIMER}"
+  else
+    warn "no dnf automatic timer unit found"
+  fi
 fi
 
 if [[ "${OPT_PRUNE:-false}" == "true" ]]; then
