@@ -107,7 +107,7 @@ as_user "systemctl --user enable --now podman.socket" \
 
 cat > /etc/profile.d/runner.sh <<EOF
 export DOCKER_HOST=unix:///run/user/${RUNNER_UID}/podman.sock
-export TESTCONTAINERS_RYUK_DISABLED=true
+export TESTCONTAINERS_RYUK_PRIVILEGED=true
 export PATH="\$HOME/.local/bin:\$HOME/.dotnet/tools:\$PATH"
 EOF
 chmod 644 /etc/profile.d/runner.sh
@@ -165,10 +165,18 @@ fi
 # would not otherwise inherit anything from /etc/profile.d.
 cat > "${RUNNER_DIR}/.env" <<EOF
 DOCKER_HOST=unix:///run/user/${RUNNER_UID}/podman.sock
-TESTCONTAINERS_RYUK_DISABLED=true
+TESTCONTAINERS_RYUK_PRIVILEGED=true
 XDG_RUNTIME_DIR=/run/user/${RUNNER_UID}
+RUNNER_TOOL_CACHE=${RUNNER_DIR}/_work/_tool
+DOTNET_INSTALL_DIR=${RUNNER_HOME}/.dotnet
 EOF
 chown "$RUNNER_USER:$RUNNER_USER" "${RUNNER_DIR}/.env"
+
+# actions/setup-dotnet installs to /usr/share/dotnet by default, which a
+# non-root runner cannot create. Fedora's own SDK lives in /usr/lib64/dotnet,
+# so nothing else has made that path either.
+install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "${RUNNER_HOME}/.dotnet"
+install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "${RUNNER_DIR}/_work/_tool"
 
 if [[ -f "${RUNNER_DIR}/.runner" ]]; then
   echo "  already registered, skipping config"
