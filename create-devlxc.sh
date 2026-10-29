@@ -258,6 +258,13 @@ else
   done
 fi
 
+# Remember whether the user intentionally skipped GitHub authentication.
+# GH_TOKEN_VALUE is unset later after securely transferring it to the guest.
+GH_AUTH_SKIPPED=false
+if [[ -z "$PAT_FILE" && -z "$GH_TOKEN_VALUE" ]]; then
+  GH_AUTH_SKIPPED=true
+fi
+
 read -rp "Timezone [Australia/Melbourne]: " TZ_IN
 TZ_IN="${TZ_IN:-Australia/Melbourne}"
 
@@ -478,14 +485,49 @@ echo "==============================================="
 echo " CT $CTID ready."
 echo " Host: $CT_HOSTNAME    IP: ${IP:-unknown}    MAC: ${ACTUAL_MAC:-unknown}"
 echo
-echo " On your client, clear the stale host key first:"
-echo "   ssh-keygen -R ${IP:-<ip>}"
-echo "   ssh ${DEV_USER}@${IP:-<ip>}"
+echo "MANUAL POST-SETUP CHECKLIST"
+echo
+echo "1. Connect to the container from your client:"
+if [[ -n "$IP" ]]; then
+  echo "   ssh ${DEV_USER}@${IP}"
+  echo "   If SSH reports a changed host key after a rebuild, run:"
+  echo "   ssh-keygen -R ${IP}"
+else
+  echo "   Find the container IP with: pct exec $CTID -- hostname -I"
+fi
+echo
+echo "2. Join this container to your Tailscale network:"
+echo "   sudo tailscale up"
+echo "   Open the authentication URL printed by Tailscale."
+echo "   sudo tailscale status"
+echo "   sudo tailscale ip -4"
+echo "   (Run these inside the container over SSH.)"
+
 if [[ "$AGENT_CLAUDE" == true || "$AGENT_CODEX" == true || "$AGENT_AGY" == true ]]; then
   echo
-  echo " Then log in (each prints a URL to open locally):"
-  [[ "$AGENT_CLAUDE" == true ]] && echo "   claude    # Claude Code"
-  [[ "$AGENT_CODEX"  == true ]] && echo "   codex     # Codex CLI"
-  [[ "$AGENT_AGY"    == true ]] && echo "   agy       # Antigravity CLI"
+  echo "3. Sign in to the selected coding agents (run inside the container):"
+  [[ "$AGENT_CLAUDE" == true ]] && echo "   claude"
+  [[ "$AGENT_CODEX"  == true ]] && echo "   codex"
+  [[ "$AGENT_AGY"    == true ]] && echo "   agy"
+  echo "   Follow each CLI's authentication prompts."
 fi
+
+echo
+if [[ "$GH_AUTH_SKIPPED" == true ]]; then
+  echo "4. GitHub authentication was skipped. If you need private repositories or pushes:"
+  echo "   gh auth login"
+  echo "   gh auth setup-git"
+else
+  echo "4. Verify GitHub access if any repository clone failed:"
+  echo "   gh auth status"
+  echo "   If needed: gh auth login && gh auth setup-git"
+fi
+
+echo
+echo "5. Review the provisioning output above:"
+echo "   - Fix any repository .env warnings before running the application."
+if [[ "$OPT_PLAYWRIGHT" == true ]]; then
+  echo "   - Confirm the Playwright browser launch smoke test passed; if not, inspect its warning."
+fi
+echo "   - Full application test suites are not run automatically; run the relevant project tests."
 echo "==============================================="
