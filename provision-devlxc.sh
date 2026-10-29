@@ -319,7 +319,7 @@ if [[ "${OPT_PLAYWRIGHT:-true}" == "true" ]]; then
 - For automated regression tests, use the project's own Playwright dependency and configuration. Check package.json, lockfiles, playwright.config.* and existing tests before installing or changing dependencies. Prefer the project-local npx playwright test / npx playwright commands.
 - Browser binaries are stored in PLAYWRIGHT_BROWSERS_PATH, normally ~/.cache/ms-playwright. The cache can contain multiple browser revisions; a project's Playwright version may need its own compatible revision.
 - The default browser is Playwright-managed Chromium, not branded Google Chrome. Do not use --browser=chrome unless the project explicitly requires branded Chrome and it is installed.
-- Before reporting that Playwright or Chrome is unavailable, check command -v playwright-cli, playwright-cli --help, printf '%s\n' "$PLAYWRIGHT_BROWSERS_PATH" and playwright-cli install-browser --list.
+- Before reporting that Playwright or Chrome is unavailable, check command -v playwright-cli, playwright-cli --help, printf '%s\n' "$PLAYWRIGHT_BROWSERS_PATH" and playwright-cli --help install-browser.
 - If a project's local Playwright dependency reports a missing browser revision, install the compatible browser for that project with npx playwright install chromium while preserving the shared PLAYWRIGHT_BROWSERS_PATH. Do not assume the global CLI's browser revision matches the project's version.
 - When the task requires UI validation, start the application and perform browser-based verification where practical. Report exactly what was tested and any failures; do not claim tests passed unless they ran successfully.
 <!-- END DEV LXC PLAYWRIGHT INSTRUCTIONS -->
