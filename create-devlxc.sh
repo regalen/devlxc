@@ -17,7 +17,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-CT_HOSTNAME="${CT_HOSTNAME:-devlxc}"
+CT_HOSTNAME="${CT_HOSTNAME:-}"               # prompted below when unset
+CT_DESCRIPTION="${CT_DESCRIPTION:-}"         # prompted below when unset
 CT_STORAGE="${CT_STORAGE:-local-lvm}"        # where the rootfs lives
 TPL_STORAGE="${TPL_STORAGE:-local}"          # where LXC templates live
 DISK_GB="${DISK_GB:-64}"
@@ -26,7 +27,9 @@ MEMORY_MB="${MEMORY_MB:-8192}"
 SWAP_MB="${SWAP_MB:-4096}"
 CPUUNITS="${CPUUNITS:-50}"                   # below the media VM so Plex wins
 BRIDGE="${BRIDGE:-vmbr0}"
-MACADDR="${MACADDR:-BC:24:11:DE:00:01}"      # fixed, so the DHCP reservation sticks
+# Keep the old DHCP-reserved MAC as an explicit option, not the default.
+LEGACY_MACADDR="BC:24:11:DE:00:01"
+MACADDR="${MACADDR:-}"                       # optional explicit override; otherwise prompt
 # Leave PAT_FILE unset to be prompted for the token instead of storing it on
 # the host. Set it to a path if you would rather keep a 600 file around.
 PAT_FILE="${PAT_FILE:-}"
@@ -57,24 +60,72 @@ if [[ -n "$PAT_FILE" && ! -r "$PAT_FILE" ]]; then
   echo "PAT_FILE set but not readable: $PAT_FILE" >&2; exit 1
 fi
 
-CTID="${CTID:-$(pvesh get /cluster/nextid)}"
-
-if [[ "${DESTROY:-0}" == "1" ]] && pct status "$CTID" &>/dev/null; then
-  echo ">> Destroying existing CT $CTID"
-  pct stop "$CTID" --skiplock 1 &>/dev/null || true
-  pct destroy "$CTID" --purge 1
-fi
-
-if pct status "$CTID" &>/dev/null; then
-  echo "CT $CTID already exists. Set DESTROY=1 to rebuild, or pass a different CTID." >&2
-  exit 1
-fi
-
 # ---------------------------------------------------------------------------
 # Questions (asked here, on a real terminal)
 # ---------------------------------------------------------------------------
 echo
 echo "=== Dev LXC setup ==="
+
+# Proxmox uses the LXC hostname as the name shown in the UI.
+if [[ -z "$CT_HOSTNAME" ]]; then
+  read -rp "Container hostname [devlxc]: " CT_HOSTNAME
+  CT_HOSTNAME="${CT_HOSTNAME:-devlxc}"
+fi
+if [[ ! "$CT_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || ${#CT_HOSTNAME} -gt 63 ]]; then
+  echo "Invalid hostname. Use 1-63 lowercase letters, digits or hyphens; no leading/trailing hyphen." >&2
+  exit 1
+fi
+
+# Preserve CTID=... for scripted rebuilds, but let interactive runs choose.
+CTID="${CTID:-}"
+if [[ -z "$CTID" ]]; then
+  NEXT_CTID="$(pvesh get /cluster/nextid)"
+  read -rp "Container ID [auto: ${NEXT_CTID}]: " CTID
+  CTID="${CTID:-$NEXT_CTID}"
+fi
+[[ "$CTID" =~ ^[0-9]+$ ]] || { echo "Container ID must be numeric." >&2; exit 1; }
+
+if pct status "$CTID" &>/dev/null && [[ "${DESTROY:-0}" != "1" ]]; then
+  echo "CT $CTID already exists. Set DESTROY=1 to rebuild, or choose a different CTID." >&2
+  exit 1
+fi
+
+if [[ -z "$CT_DESCRIPTION" ]]; then
+  read -rp "Container description [Development Container]: " CT_DESCRIPTION
+  CT_DESCRIPTION="${CT_DESCRIPTION:-Development Container}"
+fi
+
+# An omitted hwaddr lets Proxmox generate a MAC. Reuse the old one only
+# when intentionally replacing the same container/DHCP reservation.
+if [[ -z "$MACADDR" ]]; then
+  echo
+  echo "Network MAC address:"
+  echo "  1) Let Proxmox generate a new MAC (recommended for multiple containers)"
+  echo "  2) Reuse existing MAC ($LEGACY_MACADDR) for the existing DHCP reservation"
+  while :; do
+    read -rp "Choice [1]: " MAC_CHOICE
+    case "${MAC_CHOICE:-1}" in
+      1) MACADDR=""; break ;;
+      2) MACADDR="$LEGACY_MACADDR"; break ;;
+      *) echo "Please choose 1 or 2." ;;
+    esac
+  done
+fi
+
+if [[ -n "$MACADDR" ]]; then
+  [[ "$MACADDR" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] || {
+    echo "Invalid MAC address: $MACADDR" >&2; exit 1;
+  }
+  # Detect accidental reuse on this Proxmox node; ignore the CT being rebuilt.
+  while read -r OTHER_CTID; do
+    [[ -z "$OTHER_CTID" || "$OTHER_CTID" == "$CTID" ]] && continue
+    if pct config "$OTHER_CTID" 2>/dev/null | grep -Eiq "hwaddr=${MACADDR}(,|$)"; then
+      echo "MAC $MACADDR is already assigned to CT $OTHER_CTID on this node." >&2
+      echo "Select a Proxmox-generated MAC to avoid a network conflict." >&2
+      exit 1
+    fi
+  done < <(pct list | awk 'NR > 1 {print $1}')
+fi
 
 while [[ -z "$DEV_USER" ]]; do
   read -rp "Username for the container's sudo account: " DEV_USER
@@ -156,8 +207,20 @@ done
 
 echo
 echo "About to create CT $CTID ($CT_HOSTNAME): ${CORES} cores, ${MEMORY_MB}MB RAM, ${DISK_GB}GB on $CT_STORAGE"
+echo "  Description: $CT_DESCRIPTION"
+echo "  MAC: ${MACADDR:-Proxmox-generated}"
+if pct status "$CTID" &>/dev/null; then
+  echo "  WARNING: DESTROY=1 will permanently delete existing CT $CTID and its data."
+fi
 read -rp "Continue? [y/N]: " GO
 [[ "${GO,,}" == y* ]] || exit 1
+
+# Destruction must happen after the selected CTID and final confirmation.
+if [[ "${DESTROY:-0}" == "1" ]] && pct status "$CTID" &>/dev/null; then
+  echo ">> Destroying existing CT $CTID"
+  pct stop "$CTID" --skiplock 1 &>/dev/null || true
+  pct destroy "$CTID" --purge 1
+fi
 
 # ---------------------------------------------------------------------------
 # Template
@@ -182,6 +245,8 @@ fi
 # Create
 # ---------------------------------------------------------------------------
 echo ">> Creating CT $CTID"
+NET0="name=eth0,bridge=${BRIDGE},ip=dhcp,firewall=0"
+[[ -z "$MACADDR" ]] || NET0+=",hwaddr=${MACADDR}"
 pct create "$CTID" "${TPL_STORAGE}:vztmpl/${TEMPLATE}" \
   --hostname "$CT_HOSTNAME" \
   --cores "$CORES" \
@@ -189,13 +254,13 @@ pct create "$CTID" "${TPL_STORAGE}:vztmpl/${TEMPLATE}" \
   --memory "$MEMORY_MB" \
   --swap "$SWAP_MB" \
   --rootfs "${CT_STORAGE}:${DISK_GB}" \
-  --net0 "name=eth0,bridge=${BRIDGE},hwaddr=${MACADDR},ip=dhcp,firewall=0" \
+  --net0 "$NET0" \
   --features "nesting=1,keyctl=1" \
   --unprivileged "$UNPRIVILEGED" \
   --onboot 0 \
   --ostype fedora \
   --timezone "$TZ_IN" \
-  --description "Disposable dev LXC. Rebuilt by create-devlxc.sh."
+  --description "$CT_DESCRIPTION"
 
 CONF="/etc/pve/lxc/${CTID}.conf"
 
@@ -302,11 +367,13 @@ pct exec "$CTID" -- /bin/bash /root/provision-devlxc.sh
 # Done
 # ---------------------------------------------------------------------------
 IP="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}')"
+# Read the actual address from Proxmox, including when it was auto-generated.
+ACTUAL_MAC="$(pct config "$CTID" | sed -n 's/^net0:.*hwaddr=\([^,]*\).*/\1/p')"
 
 echo
 echo "==============================================="
 echo " CT $CTID ready."
-echo " Host: $CT_HOSTNAME    IP: ${IP:-unknown}    MAC: $MACADDR"
+echo " Host: $CT_HOSTNAME    IP: ${IP:-unknown}    MAC: ${ACTUAL_MAC:-unknown}"
 echo
 echo " On your client, clear the stale host key first:"
 echo "   ssh-keygen -R ${IP:-<ip>}"
