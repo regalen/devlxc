@@ -286,7 +286,7 @@ AGENT_AGY=$(ask_yn "  Antigravity CLI (agy)" n)
 
 echo
 echo "Optional extras:"
-OPT_PLAYWRIGHT=$(ask_yn "  Playwright browsers (~500 MB, chromium + system libs)" n)
+OPT_PLAYWRIGHT=$(ask_yn "  Playwright CLI, Chromium and shared agent instructions" y)
 OPT_FIXTURES=$(ask_yn "  PDF/spreadsheet fixture tools (poppler, openpyxl, xlrd, pdfplumber venv)" y)
 OPT_ROSLYNMCP=$(ask_yn "  roslyn-mcp dotnet global tool" y)
 OPT_UV=$(ask_yn "  Python toolchain (uv) for the Python repos" y)
