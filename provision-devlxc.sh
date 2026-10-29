@@ -90,6 +90,30 @@ sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd
 sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 systemctl enable --now sshd
 
+# ---------------------------------------------------------------------------
+# 2a. Tailscale
+# ---------------------------------------------------------------------------
+log "Tailscale"
+
+# Use Tailscale's official installer, which configures the appropriate package
+# repository for Fedora and installs the stable client. Skip the installer if
+# the client already exists so rerunning provisioning stays idempotent.
+if ! command -v tailscale >/dev/null 2>&1; then
+  curl -fsSL https://tailscale.com/install.sh | sh
+fi
+systemctl enable --now tailscaled
+
+# create-devlxc.sh passes the host's /dev/net/tun device into this LXC.
+# Warn rather than silently assuming kernel-mode networking is available.
+if [[ ! -c /dev/net/tun ]]; then
+  warn "/dev/net/tun is not present. Check the Proxmox LXC device passthrough; Tailscale may not connect in kernel mode."
+fi
+
+# Do not run 'tailscale up' here: joining the tailnet requires explicit
+# authentication by the user after provisioning.
+echo "  Tailscale installed and tailscaled enabled."
+echo "  If this is a new container, authenticate with: sudo tailscale up"
+
 # Subordinate ID ranges for rootless podman. Fedora's useradd normally does
 # this, but confirm rather than trust it, because the failure mode is a
 # confusing "no subuid ranges found" three steps later.
@@ -512,3 +536,8 @@ echo "  user:     ${DEV_USER}"
 echo "  repos:    ${SRC_DIR}"
 echo "  docker:   \$DOCKER_HOST -> rootless podman socket"
 echo "  agents:   claude / codex / agy (each needs an interactive login)"
+echo
+echo "Tailscale setup (new container):"
+echo "  sudo tailscale up"
+echo "  sudo tailscale status"
+echo "  sudo tailscale ip -4"
