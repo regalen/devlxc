@@ -137,6 +137,9 @@ export DOCKER_HOST=unix:///run/user/${DEV_UID}/podman.sock
 export TESTCONTAINERS_RYUK_PRIVILEGED=true
 
 export PATH="\$HOME/.local/bin:\$HOME/.dotnet/tools:\$PATH"
+
+# Shared Playwright-managed browser cache for agent CLI and project-local tests.
+export PLAYWRIGHT_BROWSERS_PATH="\$HOME/.cache/ms-playwright"
 EOF
 chmod 644 /etc/profile.d/devlxc.sh
 
@@ -258,15 +261,103 @@ if [[ "${OPT_ROSLYNMCP:-false}" == "true" ]]; then
     || warn "roslynmcp.server did not resolve. If it is not on nuget.org you need to add the original source."
 fi
 
-if [[ "${OPT_PLAYWRIGHT:-false}" == "true" ]]; then
-  log "Playwright browsers"
-  # No --with-deps: Playwright only knows how to install system libraries via
-  # apt, so it errors out on Fedora. Pull the matching libs from dnf instead.
+if [[ "${OPT_PLAYWRIGHT:-true}" == "true" ]]; then
+  log "Playwright CLI, shared Chromium and agent instructions"
+
+  # Chromium is headless by default in this LXC. Install the common Fedora
+  # runtime libraries explicitly; Playwright's --with-deps path targets apt
+  # based distributions and is not suitable for Fedora.
   dnf -y --setopt=install_weak_deps=False install \
-    nss nspr atk at-spi2-atk cups-libs libdrm libxkbcommon at-spi2-core \
-    libXcomposite libXdamage libXfixes libXrandr mesa-libgbm alsa-lib \
-    || warn "Playwright system libraries incomplete"
-  as_user "npx -y playwright install chromium" || warn "Playwright install failed"
+    alsa-lib atk at-spi2-atk at-spi2-core cairo cups-libs dbus-libs \
+    fontconfig freetype glib2 gtk3 nss nspr pango \
+    libX11 libX11-xcb libXcomposite libXcursor libXdamage libXext \
+    libXfixes libXi libXrandr libXrender libXtst \
+    libdrm libxcb libxkbcommon libxkbcommon-x11 libxshmfence \
+    libwayland-client libwayland-cursor libwayland-egl mesa-libgbm \
+    || warn "Some Playwright system libraries could not be installed; browser smoke test will verify availability"
+
+  # Keep browser binaries in one predictable per-user cache. Different
+  # Playwright versions may still require different browser revisions.
+  install -d -o "$DEV_USER" -g "$DEV_USER" "$DEV_HOME/.cache/ms-playwright"
+
+  if as_user 'source /etc/profile.d/devlxc.sh && npm install --global --prefix "$HOME/.local" @playwright/cli@latest'; then
+    if as_user 'source /etc/profile.d/devlxc.sh && playwright-cli install-browser chromium'; then
+      echo "  Playwright-managed Chromium installed"
+    else
+      warn "Playwright CLI could not install Chromium; see browser output above"
+    fi
+
+    # Install the generic Agent Skills format for Codex/Gemini-compatible
+    # agents, plus Claude Code's native skill location.
+    as_user 'source /etc/profile.d/devlxc.sh && playwright-cli install --skills=agents --global' \
+      || warn "Could not install Playwright Agent Skill under ~/.agents/skills"
+    as_user 'source /etc/profile.d/devlxc.sh && playwright-cli install --skills=claude --global' \
+      || warn "Could not install Playwright skill under ~/.claude/skills"
+
+    if as_user 'source /etc/profile.d/devlxc.sh && playwright-cli open about:blank'; then
+      as_user 'source /etc/profile.d/devlxc.sh && playwright-cli close-all' \
+        || warn "Playwright launched, but browser sessions could not be closed cleanly"
+      echo "  Playwright browser launch smoke test: passed"
+    else
+      warn "Playwright browser launch smoke test failed. Check the missing-library/browser errors above."
+      as_user 'source /etc/profile.d/devlxc.sh && playwright-cli install-browser --list' || true
+    fi
+  else
+    warn "Playwright CLI installation failed; skipping browser install and smoke test"
+  fi
+
+  # Put shared guidance at ~/src so it applies to projects stored below that
+  # directory. Preserve existing user content and replace only our marked block.
+  install -d -o "$DEV_USER" -g "$DEV_USER" "$SRC_DIR"
+  PLAYWRIGHT_INSTRUCTIONS="$(cat <<'PLAYWRIGHT_INSTRUCTIONS_EOF'
+<!-- BEGIN DEV LXC PLAYWRIGHT INSTRUCTIONS -->
+## Shared Playwright browser testing
+
+- playwright-cli is installed globally for interactive browser exploration and UI verification. Read its installed Playwright CLI skill if available, or run playwright-cli --help.
+- Use playwright-cli open http://localhost:PORT to inspect a running application, then use snapshots, element interactions and screenshots to verify the UI. Close sessions with playwright-cli close or playwright-cli close-all.
+- For automated regression tests, use the project's own Playwright dependency and configuration. Check package.json, lockfiles, playwright.config.* and existing tests before installing or changing dependencies. Prefer the project-local npx playwright test / npx playwright commands.
+- Browser binaries are stored in PLAYWRIGHT_BROWSERS_PATH, normally ~/.cache/ms-playwright. The cache can contain multiple browser revisions; a project's Playwright version may need its own compatible revision.
+- The default browser is Playwright-managed Chromium, not branded Google Chrome. Do not use --browser=chrome unless the project explicitly requires branded Chrome and it is installed.
+- Before reporting that Playwright or Chrome is unavailable, check command -v playwright-cli, playwright-cli --help, printf '%s\n' "$PLAYWRIGHT_BROWSERS_PATH" and playwright-cli install-browser --list.
+- If a project's local Playwright dependency reports a missing browser revision, install the compatible browser for that project with npx playwright install chromium while preserving the shared PLAYWRIGHT_BROWSERS_PATH. Do not assume the global CLI's browser revision matches the project's version.
+- When the task requires UI validation, start the application and perform browser-based verification where practical. Report exactly what was tested and any failures; do not claim tests passed unless they ran successfully.
+<!-- END DEV LXC PLAYWRIGHT INSTRUCTIONS -->
+PLAYWRIGHT_INSTRUCTIONS_EOF
+)"
+  export PLAYWRIGHT_INSTRUCTIONS
+  for AGENT_FILE in AGENTS.md CLAUDE.md GEMINI.md; do
+    if python3 - "$SRC_DIR/$AGENT_FILE" <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+start = "<!-- BEGIN DEV LXC PLAYWRIGHT INSTRUCTIONS -->"
+end = "<!-- END DEV LXC PLAYWRIGHT INSTRUCTIONS -->"
+block = os.environ["PLAYWRIGHT_INSTRUCTIONS"].strip()
+old = path.read_text() if path.exists() else ""
+
+if start in old or end in old:
+    if start not in old or end not in old or old.index(end) < old.index(start):
+        print(f"Refusing to change {path}: an instruction marker is incomplete.", file=sys.stderr)
+        raise SystemExit(2)
+    first = old.index(start)
+    last = old.index(end, first) + len(end)
+    updated = old[:first] + block + old[last:]
+else:
+    updated = old.rstrip() + ("\n\n" if old.strip() else "") + block + "\n"
+
+path.write_text(updated)
+PY
+    then
+      chown "$DEV_USER:$DEV_USER" "$SRC_DIR/$AGENT_FILE"
+      chmod 644 "$SRC_DIR/$AGENT_FILE"
+      echo "  shared Playwright instructions: $SRC_DIR/$AGENT_FILE"
+    else
+      warn "Could not safely update $SRC_DIR/$AGENT_FILE; existing content was preserved"
+    fi
+  done
+  unset PLAYWRIGHT_INSTRUCTIONS
 fi
 
 if [[ "${OPT_UV:-false}" == "true" ]]; then
