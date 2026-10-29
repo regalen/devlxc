@@ -11,6 +11,7 @@
 #   ./create-devlxc.sh                 # create a new container
 #   CTID=210 ./create-devlxc.sh        # force a specific ID
 #   DESTROY=1 CTID=210 ./create-devlxc.sh   # destroy 210 first, then rebuild
+#   CORES=6 MEMORY_MB=12288 DISK_GB=100 CT_STORAGE=local-lvm ONBOOT=1 ./create-devlxc.sh
 #
 set -euo pipefail
 
@@ -19,12 +20,19 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 CT_HOSTNAME="${CT_HOSTNAME:-}"               # prompted below when unset
 CT_DESCRIPTION="${CT_DESCRIPTION:-}"         # prompted below when unset
-CT_STORAGE="${CT_STORAGE:-local-lvm}"        # where the rootfs lives
+# Explicit environment variables take precedence over interactive prompts.
+CT_STORAGE="${CT_STORAGE:-}"                 # storage will be chosen interactively if unset
 TPL_STORAGE="${TPL_STORAGE:-local}"          # where LXC templates live
+DISK_GB_FROM_ENV="${DISK_GB+x}"
+CORES_FROM_ENV="${CORES+x}"
+MEMORY_MB_FROM_ENV="${MEMORY_MB+x}"
+SWAP_MB_FROM_ENV="${SWAP_MB+x}"
+ONBOOT_FROM_ENV="${ONBOOT+x}"
 DISK_GB="${DISK_GB:-64}"
 CORES="${CORES:-4}"
 MEMORY_MB="${MEMORY_MB:-8192}"
 SWAP_MB="${SWAP_MB:-4096}"
+ONBOOT="${ONBOOT:-0}"
 CPUUNITS="${CPUUNITS:-50}"                   # below the media VM so Plex wins
 BRIDGE="${BRIDGE:-vmbr0}"
 # Keep the old DHCP-reserved MAC as an explicit option, not the default.
@@ -93,6 +101,98 @@ fi
 if [[ -z "$CT_DESCRIPTION" ]]; then
   read -rp "Container description [Development Container]: " CT_DESCRIPTION
   CT_DESCRIPTION="${CT_DESCRIPTION:-Development Container}"
+fi
+
+# Prompt only when an environment override is not supplied.
+# Keeping the existing defaults makes rebuilding with Enter straightforward.
+prompt_positive_integer() {
+  local label="$1" variable="$2" overridden="$3" minimum="$4" answer
+  if [[ -z "$overridden" ]]; then
+    read -rp "$label [${!variable}]: " answer
+    printf -v "$variable" '%s' "${answer:-${!variable}}"
+  fi
+  if [[ ! "${!variable}" =~ ^[0-9]+$ ]]; then
+    echo "$label must be an integer." >&2
+    exit 1
+  fi
+  if (( 10#${!variable} < minimum )); then
+    echo "$label must be at least $minimum." >&2
+    exit 1
+  fi
+}
+
+echo
+echo "Container resources:"
+prompt_positive_integer "  CPU cores" CORES "$CORES_FROM_ENV" 1
+prompt_positive_integer "  Memory (MB)" MEMORY_MB "$MEMORY_MB_FROM_ENV" 256
+prompt_positive_integer "  Swap (MB)" SWAP_MB "$SWAP_MB_FROM_ENV" 0
+prompt_positive_integer "  Disk size (GB)" DISK_GB "$DISK_GB_FROM_ENV" 1
+
+# Enumerate only enabled, online storage pools that support container rootfs.
+# pvesm reports: Name Type Status Total Used Available %
+command -v pvesm >/dev/null || { echo "pvesm not found on the Proxmox host." >&2; exit 1; }
+if ! STORAGE_STATUS="$(pvesm status --content rootdir --enabled 1)"; then
+  echo "Unable to enumerate Proxmox storage pools." >&2
+  exit 1
+fi
+mapfile -t ROOTDIR_STORAGES < <(printf '%s\n' "$STORAGE_STATUS" | awk 'NR > 1 && $3 == "active" {print $1}')
+if (( ${#ROOTDIR_STORAGES[@]} == 0 )); then
+  echo "No active Proxmox storage pool supports LXC container rootfs (rootdir)." >&2
+  exit 1
+fi
+
+DEFAULT_STORAGE_IDX=1
+for i in "${!ROOTDIR_STORAGES[@]}"; do
+  if [[ "${ROOTDIR_STORAGES[i]}" == "local-lvm" ]]; then
+    DEFAULT_STORAGE_IDX=$((i + 1))
+    break
+  fi
+done
+DEFAULT_STORAGE="${ROOTDIR_STORAGES[DEFAULT_STORAGE_IDX-1]}"
+
+echo
+echo "Available LXC root filesystem storage:"
+for i in "${!ROOTDIR_STORAGES[@]}"; do
+  printf '  %d) %s\n' "$((i + 1))" "${ROOTDIR_STORAGES[i]}"
+done
+if [[ -z "$CT_STORAGE" ]]; then
+  read -rp "Storage selection [$DEFAULT_STORAGE_IDX - $DEFAULT_STORAGE]: " STORAGE_CHOICE
+  if [[ -z "$STORAGE_CHOICE" ]]; then
+    CT_STORAGE="$DEFAULT_STORAGE"
+  elif [[ "$STORAGE_CHOICE" =~ ^[0-9]+$ ]] &&
+       (( 10#$STORAGE_CHOICE >= 1 && 10#$STORAGE_CHOICE <= ${#ROOTDIR_STORAGES[@]} )); then
+    CT_STORAGE="${ROOTDIR_STORAGES[10#$STORAGE_CHOICE-1]}"
+  else
+    CT_STORAGE="$STORAGE_CHOICE"
+  fi
+fi
+
+STORAGE_VALID=false
+for STORAGE_NAME in "${ROOTDIR_STORAGES[@]}"; do
+  if [[ "$STORAGE_NAME" == "$CT_STORAGE" ]]; then
+    STORAGE_VALID=true
+    break
+  fi
+done
+if [[ "$STORAGE_VALID" != true ]]; then
+  echo "Storage '$CT_STORAGE' is not an active pool supporting LXC rootfs." >&2
+  exit 1
+fi
+
+# Proxmox expects --onboot 0 or 1.
+if [[ -z "$ONBOOT_FROM_ENV" ]]; then
+  while :; do
+    read -rp "Start container automatically when Proxmox boots? [y/N]: " BOOT_CHOICE
+    case "${BOOT_CHOICE,,}" in
+      ""|n|no) ONBOOT=0; break ;;
+      y|yes) ONBOOT=1; break ;;
+      *) echo "Please enter y or n." ;;
+    esac
+  done
+fi
+if [[ "$ONBOOT" != "0" && "$ONBOOT" != "1" ]]; then
+  echo "ONBOOT must be 0 or 1." >&2
+  exit 1
 fi
 
 # An omitted hwaddr lets Proxmox generate a MAC. Reuse the old one only
@@ -206,8 +306,11 @@ while :; do
 done
 
 echo
-echo "About to create CT $CTID ($CT_HOSTNAME): ${CORES} cores, ${MEMORY_MB}MB RAM, ${DISK_GB}GB on $CT_STORAGE"
+echo "About to create CT $CTID ($CT_HOSTNAME):"
 echo "  Description: $CT_DESCRIPTION"
+echo "  CPU: $CORES cores | Memory: $MEMORY_MB MB | Swap: $SWAP_MB MB"
+echo "  Disk: $DISK_GB GB | Rootfs storage: $CT_STORAGE"
+echo "  Start at boot: $([[ "$ONBOOT" == 1 ]] && echo Yes || echo No)"
 echo "  MAC: ${MACADDR:-Proxmox-generated}"
 if pct status "$CTID" &>/dev/null; then
   echo "  WARNING: DESTROY=1 will permanently delete existing CT $CTID and its data."
@@ -257,7 +360,7 @@ pct create "$CTID" "${TPL_STORAGE}:vztmpl/${TEMPLATE}" \
   --net0 "$NET0" \
   --features "nesting=1,keyctl=1" \
   --unprivileged "$UNPRIVILEGED" \
-  --onboot 0 \
+  --onboot "$ONBOOT" \
   --ostype fedora \
   --timezone "$TZ_IN" \
   --description "$CT_DESCRIPTION"
