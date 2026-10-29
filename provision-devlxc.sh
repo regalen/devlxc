@@ -300,7 +300,8 @@ if [[ "${OPT_PLAYWRIGHT:-true}" == "true" ]]; then
       echo "  Playwright browser launch smoke test: passed"
     else
       warn "Playwright browser launch smoke test failed. Check the missing-library/browser errors above."
-      as_user 'source /etc/profile.d/devlxc.sh && playwright-cli install-browser --list' || true
+      as_user 'source /etc/profile.d/devlxc.sh && playwright-cli --help install-browser' || true
+      ls -lah "$DEV_HOME/.cache/ms-playwright" || true
     fi
   else
     warn "Playwright CLI installation failed; skipping browser install and smoke test"
